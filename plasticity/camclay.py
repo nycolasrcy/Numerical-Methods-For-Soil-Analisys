@@ -1,161 +1,275 @@
 import numpy as np
-from tensor import *
+import pandas as pd
+from tensor.operations import *
+from material import *
 
 class ModifiedCamClay:
 
-    def __init__(self):
+    # __slots__ = ['name', 'email] # more memory efficient and fast way to call methods, but we cant add attributes dinamically (what is not a problem 'cause wont cahnge the way the model works)
 
-        self.k: float = 0.10 # swelling pressure line slope
-        self.l: float = 0.01 # normal pressure line slope
-        self.M: float = 1.20 # critical state line slop
-        self.v: float = 0.35 # poisson modulus
+    def __init__(self, material):
 
-        self.e: float = 1.00 # void ratio
-        self.pc: float = 150 # pre-consolidation pressure [kPa]
-        self.pcini: float = self.pc
+        self.k = material.k # swelling effective pressure line slope
+        self.l = material.l # normal effective pressure line slop
+        self.M = material.M # critical state line slope
+        self.v = material.v # poisson ratio
+        self.e = material.e # void ratio
+        self.pc = material.pc # pre-consolidation effective volumetric invariant
 
-        self.K: float # bulk modulus
-        self.E: float # elastic modulus
-        self.G: float # shear modulus
+        self.K: float # effective bulk modulus
+        self.E: float # effective elastic modulus
+        self.G: float # effective shear modulus
         self.L: float # lamé constant
         self.O: float # state variable dependent on void ratio
 
-        self.maxiter: int = 10000 # max interation for the simulation
-        self.data: np.ndarray = np.zeros((self.maxiter, 7), float) # data structure that storages information of each time-step
+        self.stress_tensor_converged: np.ndarray = np.zeros((3, 3), float)
+        self.elastoplastic_operator: np.ndarray = np.zeros((3, 3, 3, 3), float)
 
-        self.strain_tensor_total = np.zeros((3,3), float)
-        self.strain_tensor_elastic = np.zeros((3,3), float)
-        self.strain_tensor_plastic = np.zeros((3,3), float)
 
-    def update_state_variables(self, index: int, stress_tensor_converged: np.ndarray, yielding_function_value: float):
+    def update_state_variable(self, index: int, stress_tensor_converged: np.ndarray):
 
-        p =  volumetric_scalar(stress_tensor_converged)
-        pn = self.data[index - 1, 0]
+        p = volumetric_invariant(stress_tensor_converged)
 
-        '''if index == 0: # first iteration, so no need to update the void ratio
-
-            self.e = self.e
-
-        else:
-        
-            if yielding_function_value < 0: # update void ratio explicitly according to elastic behavior
-
-                self.e -= self.k * np.log(pn / p)
-
-            else: # update void ratio explicitly according to inelastic behavior
-
-                self.e -= self.l * np.log(pn / p)'''
-
-        self.K = ((1 + self.e) / self.k) * p
+        self.K = ((1 + self.e) * p) / self.k
         self.E = 3 * self.K * (1 - 2 * self.v)
-        self.G = self.E / (2 * (1 + self.v))
-        self.L = (self.E * self.v) / ((1 + self.v) * (1 - 2 * self.v))
+        self.G = self.E / (2 * (1 + 2 * self.v))
+        self.L = self.E * self.v / ((1 + self.v) * (1 - 2 * self.v))
         self.O = (1 + self.e) / (self.l - self.k)
 
     def check_for_plasticity(self, index: int, stress_tensor: np.ndarray) -> float:
-
-        p = volumetric_scalar(stress_tensor)
-        q = deviatoric_scalar(stress_tensor)
+        
+        p = volumetric_invariant(stress_tensor)
+        q = deviatoric_invariant(stress_tensor)
 
         F = (q / self.M)**2 + p * (p - self.pc)
-
+        
         return F
-
+    
     def compute_plastic_mulitplier(self, index: int, stress_tensor_trial: np.ndarray) -> float:
 
-        ptrial = volumetric_scalar(stress_tensor_trial)
-        qtrial = deviatoric_scalar(stress_tensor_trial)
-        pcn = self.pc
-        
-        # initial guesses for local and sublocal newton-raphson scheme
-        dphi = 0 
-        pc = self.pc
-        
         # iteration scheme parameters
-        maxiter    = 1000
-        Ftolerance = 1e-6
-        Rtolerance = 1e-6
+        tolerance = 1e-5
+        maxiteration = 50
+        
+        ptrial = volumetric_invariant(stress_tensor_trial)
+        qtrial = deviatoric_invariant(stress_tensor_trial)
+        pcn = self.pc 
 
-        for i in range(maxiter): # local newton-raphson scheme to calculate plastic multiplier
+        # initial guesses
+        dphi = 0
+        pc = self.pc
 
-            for j in range(maxiter): # sublocal newton-raphson scheme to calculate the new value of hardening paramter (pre-consolidation pressure)
+        for i in range(maxiteration): # local iteration scheme to compute dphi
 
-                R      = pcn * np.exp(self.O * dphi * ((2 * ptrial - pc) / (1 + 2 * self.K * dphi))) - pc
+            for j in range(maxiteration): # sublocal iteration scheme to compute pc
+
+                R = pcn * np.exp(self.O * dphi * ((2 * ptrial - pc) / (1 + 2 * self.K * dphi))) - pc
                 Rprime = pcn * np.exp(self.O * dphi * ((2 * ptrial - pc) / (1 + 2 * self.K * dphi))) * ((- self.O * dphi) / (1 + 2 * self.K * dphi)) - 1 
-
-                if abs(R) <= Rtolerance:
+                
+                if abs(R) <= tolerance:
 
                     p = (ptrial + dphi * self.K * pc) / (1 + 2 * self.K * dphi)
-                    q = qtrial / (1 + (6 * self.G * dphi) / (self.M**2))
-                
+                    q = (qtrial) / (1 + (6 * self.G * dphi) / (self.M**2))
+
+                    A = - (self.K * (2 * p - pc)**2) / (1 + (2 * self.K + self.O * pc) * dphi)
+                    B = - (2 * q**2) / ((self.M**2) * (dphi + ((self.M**2) / (6 * self.G))))
+                    C = - (p * self.O * pc) * ((2 * p - pc) / (1 + (2 * self.K + self.O * pc) * dphi))
+
+                    F = (q / self.M)**2 + p * (p - self.pc)
+                    Fprime = A + B + C
+
                     break
-                    
+
                 pc = pc - (R / Rprime)
-                
-            A = - (self.K * (2 * p - pc)**2) / (1 + (2 * self.K + self.O * pc) * dphi)
-            B = - (2 * q**2) / ((self.M**2) * (dphi + ((self.M**2) / (6 * self.G))))
-            C = - (p * self.O * pc) * ((2 * p - pc) / (1 + (2 * self.K + self.O * pc) * dphi))
 
-            F = (q**2 / self.M**2) + p * (p - pc)
-            Fprime = A + B + C
+            else:
 
-            if abs(F) <= Ftolerance:
+                raise RuntimeError(f"Sublocal Newton-Raphson's scheme did not converge! Global iteration counter: {index}.")
+            
+            if abs(F) <= tolerance:
 
-                self.pc = pc    
-                return dphi, p, q
-                
+                self.pc = pc # update the hardening parameter
+                return dphi
+            
             dphi = dphi - (F / Fprime)
-
-        raise ValueError('Local Newton-Raphson scheme do not converge!')
-
-    def build_elastoplastic_operator(self, index: int, stress_tensor_converged: np.ndarray, stress_tensor_trial: np.ndarray, yielding_function_value: float, dphi: float) -> np.ndarray:
-
-        delta = np.eye(3)
-        identity = np.einsum('ij, kl -> ijkl', delta, delta)
-        isotropic = 0.5 * (np.einsum('ik, jl -> ijkl', delta, delta) + np.einsum('il, jk -> ijkl', delta, delta))
         
-        if yielding_function_value < 0: # elastoplastic tangent operator degenerates to elastic tangent operator
+        else:
+
+            raise RuntimeError(f"Local Newton-Raphson's scheme did not converge! Global iteration counter: {index}.")            
+     
+    def build_elastoplastic_operator(self, index: int, stress_tensor_converged: np.ndarray, stress_tensor_trial: np.ndarray, dphi: float) -> np.ndarray:
+ 
+        delta = np.eye(3)
+        identity = np.einsum('ij,kl -> ijkl', delta, delta)
+        isotropic = 0.5 * (np.einsum('ik, jl -> ijkl', delta, delta) + np.einsum('il, jk -> ijkl', delta, delta))
+
+        deviatoric_norm_converged = np.linalg.norm(deviatoric_tensor(stress_tensor_converged), 'fro')
+        deviatoric_norm_trial = np.linalg.norm(deviatoric_tensor(stress_tensor_trial), 'fro')
+        
+        xi = deviatoric_norm_converged / deviatoric_norm_trial
+        n = deviatoric_tensor(stress_tensor_trial) / np.linalg.norm(deviatoric_tensor(stress_tensor_trial))
+
+        p = volumetric_invariant(stress_tensor_converged)
+        q = deviatoric_invariant(stress_tensor_converged)
+
+        a0 = 1 + 2 * self.K * dphi + self.pc * self.O * dphi
+        a1 = (1 + self.pc * self.O * dphi) / a0
+        a2 = - (2 * p - self.pc) / a0
+        a3 = 2 * self.pc * self.O * dphi / a0
+        a4 = self.O * (self.pc / self.K) * (2 * p - self.pc) / a0
+        a5 = np.sqrt(3 / 2) / (1 + 6 * self.G * (dphi / self.M**2))
+        a6 = - ( 3 * q / self.M**2) / (1 + 6 * self.G * (dphi / self.M**2))
+
+        b0 = - 2 * self.G * (2 * q / self.M**2) * a6 - self.K * ((2 * a2 - a4) * p - a2 * self.pc)
+        b1 = - self.K * ((a3 - 2 * a1) * p + a1 * self.pc) / b0
+        b2 = 2 * self.G * (2 * q / self.M**2) * (a5 / b0)
+
+        elastoplastic_operator = 2 * self.G * xi * isotropic \
+        + (self.K * (a1 + a2 * b1) - (1 / 3) * (2 * self.G) * xi) * identity \
+        + self.K * (a2 * b2) * np.einsum('ij, kl -> ijkl', delta, n) \
+        + 2 * self.G * np.sqrt(2 / 3) * (a6 * b1) * np.einsum('ij, kl -> ijkl', n, delta) \
+        + 2 * self.G * (np.sqrt(2 / 3) * (a5 + a6 * b2) - xi) * np.einsum('ij, kl -> ijkl', n, n)
+
+        return elastoplastic_operator
+    
+    def return_mapping_algorithm(self, index: int, dstrain_tensor_total: np.ndarray):
+
+        # set inital condition (ver melhor isso aqui)
+
+        if index == 0:
+
+            self.stress_tensor_converged[0,0] = 25
+            self.stress_tensor_converged[1,1] = 25
+            self.stress_tensor_converged[2,2] = 25
+
+            self.update_state_variable(index, self.stress_tensor_converged)
+            self.elastoplastic_operator = self.L * np.einsum('ij, kl -> ijkl', np.eye(3), np.eye(3)) \
+            + 2 * self.G * (0.5 * (np.einsum('ik, jl -> ijkl', np.eye(3), np.eye(3)) + np.einsum('il, jk -> ijkl', np.eye(3), np.eye(3))))
+
+        # return mapping algorithm
+
+        stress_tensor_trial = self.stress_tensor_converged + np.einsum('ijkl, kl -> ij', self.elastoplastic_modulus, dstrain_tensor_plastic)
+        
+        F = self.check_for_plasticity(index, stress_tensor_trial)
+
+        if F < 0: # elastic region
+
+            self.stress_tensor_converged = stress_tensor_trial
+            self.update_state_variable(index, self.stress_tensor_converged)
+            self.elastoplastic_operator = self.L * np.einsum('ij, kl -> ijkl', np.eye(3), np.eye(3)) \
+            + 2 * self.G * (0.5 * (np.einsum('ik, jl -> ijkl', np.eye(3), np.eye(3)) + np.einsum('il, jk -> ijkl', np.eye(3), np.eye(3))))
+
+        else: # plastic region
+
+            p = volumetric_invariant(self.stress_tensor_converged)
+            q = deviatoric_invariant(self.stress_tensor_converged)
+            pc = self.pc
+
+            try:
+
+                dphi = self.compute_plastic_multiplier(index, stress_tensor_trial)
+
+            except Exception as error:
+
+                return error # when this occour: (I) soil failed -> stop FEM iteration (II) big shit had happened on the code so the NR scheme couldn't converge -> check what's going on
             
-            elastoplastic_modulus = self.L * identity + 2 * self.G * isotropic
+            n = deviatoric_tensor(stress_tensor_trial) / np.linalg.norm(deviatoric_tensor(stress_tensor_trial), 'fro')
+            derivative = (1 / 3) * (2 * p - pc) * np.eye(3) + np.sqrt(3 / 2) * (2 * q / self.M**2) * n
+            dstrain_tensor_plastic = dphi * derivative
+
+            self.stress_tensor_converged = stress_tensor_trial - np.einsum('ijkl,kl -> ij', self.elastoplastic_operator, dstrain_tensor_plastic)
+            self.update_state_variable(index, self.stress_tensor_converged)
+            self.elastoplastic_operator = self.build_elastoplastic_operator(index, self.stress_tensor_converged, stress_tensor_trial, dphi)
+
+'''
+
+basicamente, a classe do camclay funciona assim:
+instancia a classe e determina o material para ela
+
+ex
+
+simulacamclay = ModifiedCamClay(silte)
+
+a gente vai usar somente a função ´return_mapping_algorithm´ para as simulações
+essa função consome um acréscimo de de deformações e atualiza a variável de tensor de tensões convergido da instancia
+
+isso que tem que ser notado, os valores do tensor de tensões convergidos e o operador elastoplástico são armazenados dentro
+na instância da classe para cada nova iteração. estão dentro do __init__
+
+preciso ver como vou definir o estado de tensões inicial ainda...
+preciso ver formar de melhorar a função return_mapping_algorith
+
+'''
+
+
+'''
+
+maxiter = 1000
+data = np.zeros((maxiter, 2), float)
+
+undrained = ModifiedCamClay(argila)
+
+stress_tensor_converged = np.zeros((3,3), float)
+dstrain_tensor_total = np.zeros((3,3), float)
+elastoplastic_operator = np.zeros((3,3,3,3), float)
+
+stress_tensor_converged[0,0] = 25
+stress_tensor_converged[1,1] = 25
+stress_tensor_converged[2,2] = 25
+
+undrained.update_state_variable(0, stress_tensor_converged)
+
+depsilon = 8e-5 #8e-5
+dstrain_tensor_total[0,0] = depsilon
+dstrain_tensor_total += - (depsilon / 3) * np.eye(3)
+
+delta = np.eye(3)
+identity = np.einsum('ij, kl -> ijkl', delta, delta)
+isotropic = 0.5 * (np.einsum('ik, jl -> ijkl', delta, delta) + np.einsum('il, jk -> ijkl', delta, delta))
+elastoplastic_operator = undrained.L * identity + 2 * undrained.G * isotropic
+
+for index in range(maxiter):
+
+
+    stress_tensor_trial = stress_tensor_converged + np.einsum('ijkl, kl -> ij', elastoplastic_operator, dstrain_tensor_total)
+
+    F = undrained.check_for_plasticity(index, stress_tensor_trial)
+
+    if F < 0:
+
+        stress_tensor_converged = stress_tensor_trial
+        undrained.update_state_variable(index, stress_tensor_converged)
+        elastoplastic_operator = undrained.L * identity + 2 * undrained.G * isotropic
+        
+        data[index, 0] = volumetric_invariant(stress_tensor_converged)
+        data[index, 1] = deviatoric_invariant(stress_tensor_converged)
+    else:
+
+        p = volumetric_invariant(stress_tensor_converged)
+        q = deviatoric_invariant(stress_tensor_converged)
+        pc = undrained.pc
+
+        try:
+
+            dphi = undrained.compute_plastic_mulitplier(index, stress_tensor_trial)
+            print(index, dphi)
+        except Exception as error:
             
-            return elastoplastic_modulus
+            print(error)
+            break
+        
+        n = deviatoric_tensor(stress_tensor_trial) / np.linalg.norm(deviatoric_tensor(stress_tensor_trial), 'fro')
+        derivative = (1 / 3) * (2 * p - pc) * np.eye(3) + np.sqrt(3 / 2) * (2 * q / undrained.M**2) * n
+        dstrain_tensor_plastic = dphi * derivative
 
-        else: # compute elastoplastic tangent operator
+        stress_tensor_converged = stress_tensor_trial - np.einsum('ijkl,kl -> ij', elastoplastic_operator, dstrain_tensor_plastic)
+        undrained.update_state_variable(index, stress_tensor_converged)
+        elastoplastic_operator = undrained.build_elastoplastic_operator(index, stress_tensor_converged, stress_tensor_trial, dphi)
 
-            p = volumetric_scalar(stress_tensor_converged)
-            q = deviatoric_scalar(stress_tensor_converged)
-
-            Sconve = np.linalg.norm(deviatoric_tensor(stress_tensor_converged), 'fro')
-            Strial = np.linalg.norm(deviatoric_tensor(stress_tensor_trial), 'fro')
-            xi = Sconve / Strial
-  
-            n = deviatoric_tensor(stress_tensor_trial) / np.linalg.norm(deviatoric_tensor(stress_tensor_trial))
-            
-            # pai, pai, por que me abandonastes?
-
-            a0 = 1 + 2 * self.K * dphi + self.pc * self.O * dphi
-            a1 = (1 + self.pc * self.O * dphi) / a0
-            a2 = - (2 * p - self.pc) / a0
-            a3 = 2 * self.pc * self.O * dphi / a0
-            a4 = self.O * (self.pc / self.K) * (2 * p - self.pc) / a0
-            a5 = np.sqrt(3 / 2) / (1 + 6 * self.G * (dphi / self.M**2))
-            a6 = - ( 3 * q / self.M**2) / (1 + 6 * self.G * (dphi / self.M**2))
-
-            b0 = - 2 * self.G * (2 * q / self.M**2) * a6 - self.K * ((2 * a2 - a4) * p - a2 * self.pc)
-            b1 = - self.K * ((a3 - 2 * a1) * p + a1 * self.pc) / b0
-            b2 = 2 * self.G * (2 * q / self.M**2) * (a5 / b0)
-
-            elastoplastic_modulus = 2 * self.G * xi * isotropic \
-                                  + (self.K * (a1 + a2 * b1) - (1 / 3) * (2 * self.G) * xi) * identity \
-                                  + self.K * (a2 * b2) * np.einsum('ij, kl -> ijkl', delta, n) \
-                                  + 2 * self.G * np.sqrt(2 / 3) * (a6 * b1) * np.einsum('ij, kl -> ijkl', n, delta) \
-                                  + 2 * self.G * (np.sqrt(2 / 3) * (a5 + a6 * b2) - xi) * np.einsum('ij, kl -> ijkl', n, n)
-            
-            return elastoplastic_modulus
-   
+        data[index, 0] = volumetric_invariant(stress_tensor_converged)
+        data[index, 1] = deviatoric_invariant(stress_tensor_converged)
 
 
-
-
-
-
+df = pd.DataFrame(data)
+df.to_excel('log.xlsx', index = False)
+'''
