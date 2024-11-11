@@ -19,7 +19,7 @@ u = np.zeros((nodes, nodes)) + 20
 # condições de contorno
 u[0, :] = np.linspace(0, 100, nodes)
 u[-1, :] = np.linspace(0, 100, nodes)
-u[:, 0] = np.linspace(100, 100, nodes)
+u[:, 0] = np.linspace(0, 100, nodes)
 u[:, -1] = np.linspace(0, 100, nodes)
 
 # Configuração do gráfico
