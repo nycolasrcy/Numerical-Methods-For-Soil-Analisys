@@ -1,14 +1,14 @@
 import numpy as np
 import pandas as pd
-from ..tensor import *
-from ..material import *
+from material.materials import *
+from tensor.operations import *
 
 class ModifiedCamClay:
 
     def __init__(self, material):
 
-        self.k = material.k # swelling effective pressure line slope
-        self.l = material.l # normal effective pressure line slop
+        self.k = material.k # swelling effective pressure line slope -> ensaio de adensamento
+        self.l = material.l # normal effective pressure line slop -> ensaio de adensamento
         self.M = material.M # critical state line slope
         self.v = material.v # poisson ratio
         self.e = material.e # void ratio
@@ -180,11 +180,13 @@ class ModifiedCamClay:
             self.update_state_variable(index, self.stress_tensor_converged)
             self.elastoplastic_operator = self.build_elastoplastic_operator(index, self.stress_tensor_converged, stress_tensor_trial, dphi)
 
+
+
 def trixial_test():
     
     '''
     Testando o comportamento do modelo e de suas funções em uma simulação de ensaio
-    triaxial não-drenado sobre um ponto material
+    triaxial drenado sobre um ponto material
     '''
 
     maxiter = 1000
@@ -196,9 +198,9 @@ def trixial_test():
     dstrain_tensor_total = np.zeros((3,3), float)
     elastoplastic_operator = np.zeros((3,3,3,3), float)
 
-    stress_tensor_converged[0,0] = 25
-    stress_tensor_converged[1,1] = 25
-    stress_tensor_converged[2,2] = 25
+    stress_tensor_converged[0,0] = 120
+    stress_tensor_converged[1,1] = 120
+    stress_tensor_converged[2,2] = 120
 
     undrained.update_state_variable(0, stress_tensor_converged)
 
@@ -254,3 +256,6 @@ def trixial_test():
 
     df = pd.DataFrame(data)
     df.to_excel('log.xlsx', index = False)
+
+# teste rodando
+trixial_test()
